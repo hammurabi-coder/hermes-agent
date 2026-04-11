@@ -10,12 +10,48 @@ import os
 import sys
 import threading
 import time
+from dataclasses import dataclass, field
+from difflib import unified_diff
+from pathlib import Path
 
 # ANSI escape codes for coloring tool failure indicators
 _RED = "\033[31m"
 _RESET = "\033[0m"
 
 logger = logging.getLogger(__name__)
+
+_ANSI_RESET = "\033[0m"
+_ANSI_DIM = "\033[38;2;150;150;150m"
+_ANSI_FILE = "\033[38;2;180;160;255m"
+_ANSI_HUNK = "\033[38;2;120;120;140m"
+_ANSI_MINUS = "\033[38;2;255;255;255;48;2;120;20;20m"
+_ANSI_PLUS = "\033[38;2;255;255;255;48;2;20;90;20m"
+_MAX_INLINE_DIFF_FILES = 6
+_MAX_INLINE_DIFF_LINES = 80
+
+
+@dataclass
+class LocalEditSnapshot:
+    """Pre-tool filesystem snapshot used to render diffs locally after writes."""
+    paths: list[Path] = field(default_factory=list)
+    before: dict[str, str | None] = field(default_factory=dict)
+
+# =========================================================================
+# Configurable tool preview length (0 = no limit)
+# Set once at startup by CLI or gateway from display.tool_preview_length config.
+# =========================================================================
+_tool_preview_max_len: int = 0  # 0 = unlimited
+
+
+def set_tool_preview_max_len(n: int) -> None:
+    """Set the global max length for tool call previews. 0 = no limit."""
+    global _tool_preview_max_len
+    _tool_preview_max_len = max(int(n), 0) if n else 0
+
+
+def get_tool_preview_max_len() -> int:
+    """Return the configured max preview length (0 = unlimited)."""
+    return _tool_preview_max_len
 
 
 # =========================================================================
@@ -29,26 +65,6 @@ def _get_skin():
         return get_active_skin()
     except Exception:
         return None
-
-
-def get_skin_faces(key: str, default: list) -> list:
-    """Get spinner face list from active skin, falling back to default."""
-    skin = _get_skin()
-    if skin:
-        faces = skin.get_spinner_list(key)
-        if faces:
-            return faces
-    return default
-
-
-def get_skin_verbs() -> list:
-    """Get thinking verbs from active skin."""
-    skin = _get_skin()
-    if skin:
-        verbs = skin.get_spinner_list("thinking_verbs")
-        if verbs:
-            return verbs
-    return KawaiiSpinner.THINKING_VERBS
 
 
 def get_skin_tool_prefix() -> str:
@@ -94,8 +110,14 @@ def _oneline(text: str) -> str:
     return " ".join(text.split())
 
 
-def build_tool_preview(tool_name: str, args: dict, max_len: int = 40) -> str | None:
-    """Build a short preview of a tool call's primary argument for display."""
+def build_tool_preview(tool_name: str, args: dict, max_len: int | None = None) -> str | None:
+    """Build a short preview of a tool call's primary argument for display.
+
+    *max_len* controls truncation.  ``None`` (default) defers to the global
+    ``_tool_preview_max_len`` set via config; ``0`` means unlimited.
+    """
+    if max_len is None:
+        max_len = _tool_preview_max_len
     if not args:
         return None
     primary_args = {
@@ -190,9 +212,303 @@ def build_tool_preview(tool_name: str, args: dict, max_len: int = 40) -> str | N
     preview = _oneline(str(value))
     if not preview:
         return None
-    if len(preview) > max_len:
+    if max_len > 0 and len(preview) > max_len:
         preview = preview[:max_len - 3] + "..."
     return preview
+
+
+# =========================================================================
+# Inline diff previews for write actions
+# =========================================================================
+
+def _resolved_path(path: str) -> Path:
+    """Resolve a possibly-relative filesystem path against the current cwd."""
+    candidate = Path(os.path.expanduser(path))
+    if candidate.is_absolute():
+        return candidate
+    return Path.cwd() / candidate
+
+
+def _snapshot_text(path: Path) -> str | None:
+    """Return UTF-8 file content, or None for missing/unreadable files."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except (FileNotFoundError, IsADirectoryError, UnicodeDecodeError, OSError):
+        return None
+
+
+def _display_diff_path(path: Path) -> str:
+    """Prefer cwd-relative paths in diffs when available."""
+    try:
+        return str(path.resolve().relative_to(Path.cwd().resolve()))
+    except Exception:
+        return str(path)
+
+
+def _resolve_skill_manage_paths(args: dict) -> list[Path]:
+    """Resolve skill_manage write targets to filesystem paths."""
+    action = args.get("action")
+    name = args.get("name")
+    if not action or not name:
+        return []
+
+    from tools.skill_manager_tool import _find_skill, _resolve_skill_dir
+
+    if action == "create":
+        skill_dir = _resolve_skill_dir(name, args.get("category"))
+        return [skill_dir / "SKILL.md"]
+
+    existing = _find_skill(name)
+    if not existing:
+        return []
+
+    skill_dir = Path(existing["path"])
+    if action in {"edit", "patch"}:
+        file_path = args.get("file_path")
+        return [skill_dir / file_path] if file_path else [skill_dir / "SKILL.md"]
+    if action in {"write_file", "remove_file"}:
+        file_path = args.get("file_path")
+        return [skill_dir / file_path] if file_path else []
+    if action == "delete":
+        files = [path for path in sorted(skill_dir.rglob("*")) if path.is_file()]
+        return files
+    return []
+
+
+def _resolve_local_edit_paths(tool_name: str, function_args: dict | None) -> list[Path]:
+    """Resolve local filesystem targets for write-capable tools."""
+    if not isinstance(function_args, dict):
+        return []
+
+    if tool_name == "write_file":
+        path = function_args.get("path")
+        return [_resolved_path(path)] if path else []
+
+    if tool_name == "patch":
+        path = function_args.get("path")
+        return [_resolved_path(path)] if path else []
+
+    if tool_name == "skill_manage":
+        return _resolve_skill_manage_paths(function_args)
+
+    return []
+
+
+def capture_local_edit_snapshot(tool_name: str, function_args: dict | None) -> LocalEditSnapshot | None:
+    """Capture before-state for local write previews."""
+    paths = _resolve_local_edit_paths(tool_name, function_args)
+    if not paths:
+        return None
+
+    snapshot = LocalEditSnapshot(paths=paths)
+    for path in paths:
+        snapshot.before[str(path)] = _snapshot_text(path)
+    return snapshot
+
+
+def _result_succeeded(result: str | None) -> bool:
+    """Conservatively detect whether a tool result represents success."""
+    if not result:
+        return False
+    try:
+        data = json.loads(result)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    if data.get("error"):
+        return False
+    if "success" in data:
+        return bool(data.get("success"))
+    return True
+
+
+def _diff_from_snapshot(snapshot: LocalEditSnapshot | None) -> str | None:
+    """Generate unified diff text from a stored before-state and current files."""
+    if not snapshot:
+        return None
+
+    chunks: list[str] = []
+    for path in snapshot.paths:
+        before = snapshot.before.get(str(path))
+        after = _snapshot_text(path)
+        if before == after:
+            continue
+
+        display_path = _display_diff_path(path)
+        diff = "".join(
+            unified_diff(
+                [] if before is None else before.splitlines(keepends=True),
+                [] if after is None else after.splitlines(keepends=True),
+                fromfile=f"a/{display_path}",
+                tofile=f"b/{display_path}",
+            )
+        )
+        if diff:
+            chunks.append(diff)
+
+    if not chunks:
+        return None
+    return "".join(chunk if chunk.endswith("\n") else chunk + "\n" for chunk in chunks)
+
+
+def extract_edit_diff(
+    tool_name: str,
+    result: str | None,
+    *,
+    function_args: dict | None = None,
+    snapshot: LocalEditSnapshot | None = None,
+) -> str | None:
+    """Extract a unified diff from a file-edit tool result."""
+    if tool_name == "patch" and result:
+        try:
+            data = json.loads(result)
+        except (json.JSONDecodeError, TypeError):
+            data = None
+        if isinstance(data, dict):
+            diff = data.get("diff")
+            if isinstance(diff, str) and diff.strip():
+                return diff
+
+    if tool_name not in {"write_file", "patch", "skill_manage"}:
+        return None
+    if not _result_succeeded(result):
+        return None
+    return _diff_from_snapshot(snapshot)
+
+
+def _emit_inline_diff(diff_text: str, print_fn) -> bool:
+    """Emit rendered diff text through the CLI's prompt_toolkit-safe printer."""
+    if print_fn is None or not diff_text:
+        return False
+    try:
+        print_fn("  ┊ review diff")
+        for line in diff_text.rstrip("\n").splitlines():
+            print_fn(line)
+        return True
+    except Exception:
+        return False
+
+
+def _render_inline_unified_diff(diff: str) -> list[str]:
+    """Render unified diff lines in Hermes' inline transcript style."""
+    rendered: list[str] = []
+    from_file = None
+    to_file = None
+
+    for raw_line in diff.splitlines():
+        if raw_line.startswith("--- "):
+            from_file = raw_line[4:].strip()
+            continue
+        if raw_line.startswith("+++ "):
+            to_file = raw_line[4:].strip()
+            if from_file or to_file:
+                rendered.append(f"{_ANSI_FILE}{from_file or 'a/?'} → {to_file or 'b/?'}{_ANSI_RESET}")
+            continue
+        if raw_line.startswith("@@"):
+            rendered.append(f"{_ANSI_HUNK}{raw_line}{_ANSI_RESET}")
+            continue
+        if raw_line.startswith("-"):
+            rendered.append(f"{_ANSI_MINUS}{raw_line}{_ANSI_RESET}")
+            continue
+        if raw_line.startswith("+"):
+            rendered.append(f"{_ANSI_PLUS}{raw_line}{_ANSI_RESET}")
+            continue
+        if raw_line.startswith(" "):
+            rendered.append(f"{_ANSI_DIM}{raw_line}{_ANSI_RESET}")
+            continue
+        if raw_line:
+            rendered.append(raw_line)
+
+    return rendered
+
+
+def _split_unified_diff_sections(diff: str) -> list[str]:
+    """Split a unified diff into per-file sections."""
+    sections: list[list[str]] = []
+    current: list[str] = []
+
+    for line in diff.splitlines():
+        if line.startswith("--- ") and current:
+            sections.append(current)
+            current = [line]
+            continue
+        current.append(line)
+
+    if current:
+        sections.append(current)
+
+    return ["\n".join(section) for section in sections if section]
+
+
+def _summarize_rendered_diff_sections(
+    diff: str,
+    *,
+    max_files: int = _MAX_INLINE_DIFF_FILES,
+    max_lines: int = _MAX_INLINE_DIFF_LINES,
+) -> list[str]:
+    """Render diff sections while capping file count and total line count."""
+    sections = _split_unified_diff_sections(diff)
+    rendered: list[str] = []
+    omitted_files = 0
+    omitted_lines = 0
+
+    for idx, section in enumerate(sections):
+        if idx >= max_files:
+            omitted_files += 1
+            omitted_lines += len(_render_inline_unified_diff(section))
+            continue
+
+        section_lines = _render_inline_unified_diff(section)
+        remaining_budget = max_lines - len(rendered)
+        if remaining_budget <= 0:
+            omitted_lines += len(section_lines)
+            omitted_files += 1
+            continue
+
+        if len(section_lines) <= remaining_budget:
+            rendered.extend(section_lines)
+            continue
+
+        rendered.extend(section_lines[:remaining_budget])
+        omitted_lines += len(section_lines) - remaining_budget
+        omitted_files += 1 + max(0, len(sections) - idx - 1)
+        for leftover in sections[idx + 1:]:
+            omitted_lines += len(_render_inline_unified_diff(leftover))
+        break
+
+    if omitted_files or omitted_lines:
+        summary = f"… omitted {omitted_lines} diff line(s)"
+        if omitted_files:
+            summary += f" across {omitted_files} additional file(s)/section(s)"
+        rendered.append(f"{_ANSI_HUNK}{summary}{_ANSI_RESET}")
+
+    return rendered
+
+
+def render_edit_diff_with_delta(
+    tool_name: str,
+    result: str | None,
+    *,
+    function_args: dict | None = None,
+    snapshot: LocalEditSnapshot | None = None,
+    print_fn=None,
+) -> bool:
+    """Render an edit diff inline without taking over the terminal UI."""
+    diff = extract_edit_diff(
+        tool_name,
+        result,
+        function_args=function_args,
+        snapshot=snapshot,
+    )
+    if not diff:
+        return False
+    try:
+        rendered_lines = _summarize_rendered_diff_sections(diff)
+    except Exception as exc:
+        logger.debug("Could not render inline diff: %s", exc)
+        return False
+    return _emit_inline_diff("\n".join(rendered_lines), print_fn)
 
 
 # =========================================================================
@@ -231,7 +547,7 @@ class KawaiiSpinner:
         "analyzing", "computing", "synthesizing", "formulating", "brainstorming",
     ]
 
-    def __init__(self, message: str = "", spinner_type: str = 'dots'):
+    def __init__(self, message: str = "", spinner_type: str = 'dots', print_fn=None):
         self.message = message
         self.spinner_frames = self.SPINNERS.get(spinner_type, self.SPINNERS['dots'])
         self.running = False
@@ -239,12 +555,26 @@ class KawaiiSpinner:
         self.frame_idx = 0
         self.start_time = None
         self.last_line_len = 0
+        # Optional callable to route all output through (e.g. a no-op for silent
+        # background agents).  When set, bypasses self._out entirely so that
+        # agents with _print_fn overridden remain fully silent.
+        self._print_fn = print_fn
         # Capture stdout NOW, before any redirect_stdout(devnull) from
         # child agents can replace sys.stdout with a black hole.
         self._out = sys.stdout
 
     def _write(self, text: str, end: str = '\n', flush: bool = False):
-        """Write to the stdout captured at spinner creation time."""
+        """Write to the stdout captured at spinner creation time.
+
+        If a print_fn was supplied at construction, all output is routed through
+        it instead — allowing callers to silence the spinner with a no-op lambda.
+        """
+        if self._print_fn is not None:
+            try:
+                self._print_fn(text)
+            except Exception:
+                pass
+            return
         try:
             self._out.write(text + end)
             if flush:
@@ -270,11 +600,11 @@ class KawaiiSpinner:
         The CLI already drives a TUI widget (_spinner_text) for spinner display,
         so KawaiiSpinner's \\r-based animation is redundant under StdoutProxy.
         """
-        out = self._out
-        # StdoutProxy has a 'raw' attribute (bool) that plain file objects lack.
-        if hasattr(out, 'raw') and type(out).__name__ == 'StdoutProxy':
-            return True
-        return False
+        try:
+            from prompt_toolkit.patch_stdout import StdoutProxy
+            return isinstance(self._out, StdoutProxy)
+        except ImportError:
+            return False
 
     def _animate(self):
         # When stdout is not a real terminal (e.g. Docker, systemd, pipe),
@@ -374,46 +704,6 @@ class KawaiiSpinner:
 
 
 # =========================================================================
-# Kawaii face arrays (used by AIAgent._execute_tool_calls for spinner text)
-# =========================================================================
-
-KAWAII_SEARCH = [
-    "♪(´ε` )", "(｡◕‿◕｡)", "ヾ(＾∇＾)", "(◕ᴗ◕✿)", "( ˘▽˘)っ",
-    "٩(◕‿◕｡)۶", "(✿◠‿◠)", "♪～(´ε｀ )", "(ノ´ヮ`)ノ*:・゚✧", "＼(◎o◎)／",
-]
-KAWAII_READ = [
-    "φ(゜▽゜*)♪", "( ˘▽˘)っ", "(⌐■_■)", "٩(｡•́‿•̀｡)۶", "(◕‿◕✿)",
-    "ヾ(＠⌒ー⌒＠)ノ", "(✧ω✧)", "♪(๑ᴖ◡ᴖ๑)♪", "(≧◡≦)", "( ´ ▽ ` )ノ",
-]
-KAWAII_TERMINAL = [
-    "ヽ(>∀<☆)ノ", "(ノ°∀°)ノ", "٩(^ᴗ^)۶", "ヾ(⌐■_■)ノ♪", "(•̀ᴗ•́)و",
-    "┗(＾0＾)┓", "(｀・ω・´)", "＼(￣▽￣)／", "(ง •̀_•́)ง", "ヽ(´▽`)/",
-]
-KAWAII_BROWSER = [
-    "(ノ°∀°)ノ", "(☞゚ヮ゚)☞", "( ͡° ͜ʖ ͡°)", "┌( ಠ_ಠ)┘", "(⊙_⊙)？",
-    "ヾ(•ω•`)o", "(￣ω￣)", "( ˇωˇ )", "(ᵔᴥᵔ)", "＼(◎o◎)／",
-]
-KAWAII_CREATE = [
-    "✧*。٩(ˊᗜˋ*)و✧", "(ﾉ◕ヮ◕)ﾉ*:・ﾟ✧", "ヽ(>∀<☆)ノ", "٩(♡ε♡)۶", "(◕‿◕)♡",
-    "✿◕ ‿ ◕✿", "(*≧▽≦)", "ヾ(＾-＾)ノ", "(☆▽☆)", "°˖✧◝(⁰▿⁰)◜✧˖°",
-]
-KAWAII_SKILL = [
-    "ヾ(＠⌒ー⌒＠)ノ", "(๑˃ᴗ˂)ﻭ", "٩(◕‿◕｡)۶", "(✿╹◡╹)", "ヽ(・∀・)ノ",
-    "(ノ´ヮ`)ノ*:・ﾟ✧", "♪(๑ᴖ◡ᴖ๑)♪", "(◠‿◠)", "٩(ˊᗜˋ*)و", "(＾▽＾)",
-    "ヾ(＾∇＾)", "(★ω★)/", "٩(｡•́‿•̀｡)۶", "(◕ᴗ◕✿)", "＼(◎o◎)／",
-    "(✧ω✧)", "ヽ(>∀<☆)ノ", "( ˘▽˘)っ", "(≧◡≦) ♡", "ヾ(￣▽￣)",
-]
-KAWAII_THINK = [
-    "(っ°Д°;)っ", "(；′⌒`)", "(・_・ヾ", "( ´_ゝ`)", "(￣ヘ￣)",
-    "(。-`ω´-)", "( ˘︹˘ )", "(¬_¬)", "ヽ(ー_ー )ノ", "(；一_一)",
-]
-KAWAII_GENERIC = [
-    "♪(´ε` )", "(◕‿◕✿)", "ヾ(＾∇＾)", "٩(◕‿◕｡)۶", "(✿◠‿◠)",
-    "(ノ´ヮ`)ノ*:・ﾟ✧", "ヽ(>∀<☆)ノ", "(☆▽☆)", "( ˘▽˘)っ", "(≧◡≦)",
-]
-
-
-# =========================================================================
 # Cute tool message (completion line that replaces the spinner)
 # =========================================================================
 
@@ -470,10 +760,14 @@ def get_cute_tool_message(
 
     def _trunc(s, n=40):
         s = str(s)
+        if _tool_preview_max_len == 0:
+            return s  # no limit
         return (s[:n-3] + "...") if len(s) > n else s
 
     def _path(p, n=35):
         p = str(p)
+        if _tool_preview_max_len == 0:
+            return p  # no limit
         return ("..." + p[-(n-3):]) if len(p) > n else p
 
     def _wrap(line: str) -> str:
@@ -536,8 +830,6 @@ def get_cute_tool_message(
         return _wrap(f"┊ ◀️  back      {dur}")
     if tool_name == "browser_press":
         return _wrap(f"┊ ⌨️  press     {args.get('key', '?')}  {dur}")
-    if tool_name == "browser_close":
-        return _wrap(f"┊ 🚪 close     browser  {dur}")
     if tool_name == "browser_get_images":
         return _wrap(f"┊ 🖼️  images    extracting  {dur}")
     if tool_name == "browser_vision":
@@ -618,40 +910,6 @@ _SKY_BLUE = "\033[38;5;117m"
 _ANSI_RESET = "\033[0m"
 
 
-def honcho_session_url(workspace: str, session_name: str) -> str:
-    """Build a Honcho app URL for a session."""
-    from urllib.parse import quote
-    return (
-        f"https://app.honcho.dev/explore"
-        f"?workspace={quote(workspace, safe='')}"
-        f"&view=sessions"
-        f"&session={quote(session_name, safe='')}"
-    )
-
-
-def _osc8_link(url: str, text: str) -> str:
-    """OSC 8 terminal hyperlink (clickable in iTerm2, Ghostty, WezTerm, etc.)."""
-    return f"\033]8;;{url}\033\\{text}\033]8;;\033\\"
-
-
-def honcho_session_line(workspace: str, session_name: str) -> str:
-    """One-line session indicator: `Honcho session: <clickable name>`."""
-    url = honcho_session_url(workspace, session_name)
-    linked_name = _osc8_link(url, f"{_SKY_BLUE}{session_name}{_ANSI_RESET}")
-    return f"{_DIM}Honcho session:{_ANSI_RESET} {linked_name}"
-
-
-def write_tty(text: str) -> None:
-    """Write directly to /dev/tty, bypassing stdout capture."""
-    try:
-        fd = os.open("/dev/tty", os.O_WRONLY)
-        os.write(fd, text.encode("utf-8"))
-        os.close(fd)
-    except OSError:
-        sys.stdout.write(text)
-        sys.stdout.flush()
-
-
 # =========================================================================
 # Context pressure display (CLI user-facing warnings)
 # =========================================================================
@@ -685,7 +943,7 @@ def format_context_pressure(
         threshold_percent: Compaction threshold as a fraction of context window.
         compression_enabled: Whether auto-compression is active.
     """
-    pct_int = int(compaction_progress * 100)
+    pct_int = min(int(compaction_progress * 100), 100)
     filled = min(int(compaction_progress * _BAR_WIDTH), _BAR_WIDTH)
     bar = _BAR_FILLED * filled + _BAR_EMPTY * (_BAR_WIDTH - filled)
 
@@ -715,7 +973,7 @@ def format_context_pressure_gateway(
     No ANSI — just Unicode and plain text suitable for Telegram/Discord/etc.
     The percentage shows progress toward the compaction threshold.
     """
-    pct_int = int(compaction_progress * 100)
+    pct_int = min(int(compaction_progress * 100), 100)
     filled = min(int(compaction_progress * _BAR_WIDTH), _BAR_WIDTH)
     bar = _BAR_FILLED * filled + _BAR_EMPTY * (_BAR_WIDTH - filled)
 
