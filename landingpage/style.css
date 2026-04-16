@@ -135,11 +135,12 @@ strong {
     left: 0;
     right: 0;
     z-index: 100;
-    background: rgba(7, 7, 13, 0.8);
+    background: rgba(7, 7, 13, 0.85);
     backdrop-filter: blur(20px);
     -webkit-backdrop-filter: blur(20px);
     border-bottom: 1px solid var(--border);
-    transition: border-bottom-color 0.3s var(--ease-out-quad);
+    box-shadow: 0 1px 24px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.02) inset;
+    transition: border-bottom-color 0.3s var(--ease-out-quad), box-shadow 0.3s var(--ease-out-quad);
 }
 
 .nav-inner {
@@ -341,8 +342,8 @@ strong {
 }
 
 .hero-subtitle {
-    font-size: 17px;
-    line-height: 1.7;
+    font-size: 15px;
+    line-height: 1.75;
     color: var(--text-dim);
     max-width: 620px;
     margin: 0 auto 36px;
@@ -524,7 +525,7 @@ strong {
     border-radius: var(--radius);
     font-size: 14px;
     font-weight: 550;
-    transition: background 0.25s var(--ease-out-quint), border-color 0.25s var(--ease-out-quad), color 0.2s var(--ease-out-quad), transform 0.25s var(--ease-out-quint);
+    transition: background 0.25s var(--ease-out-quint), border-color 0.25s var(--ease-out-quad), color 0.2s var(--ease-out-quad), transform 0.1s var(--ease-out-quint), box-shadow 0.25s var(--ease-out-quint);
     border: 1px solid transparent;
     will-change: transform;
 }
@@ -535,8 +536,18 @@ strong {
     border-color: rgba(48, 80, 255, 0.25);
 }
 .btn-primary:hover {
+<<<<<<< Updated upstream
     background: rgba(48, 80, 255, 0.22);
     border-color: rgba(48, 80, 255, 0.4);
+=======
+    background: linear-gradient(180deg, #6080FF 0%, var(--primary-light) 100%);
+    border-color: var(--primary);
+    border-top-color: #80A0FF;
+    border-bottom-color: var(--primary-dim);
+    box-shadow:
+        0 8px 28px rgba(48, 80, 255, 0.55),
+        0 1px 0 rgba(255,255,255,0.14) inset;
+>>>>>>> Stashed changes
     color: #fff;
 }
 
@@ -546,7 +557,19 @@ strong {
     }
 }
 .btn:active {
+<<<<<<< Updated upstream
     transform: scale(0.97);
+=======
+    transition: transform 50ms var(--ease-out-quint), background 0.25s var(--ease-out-quint), box-shadow 0.25s var(--ease-out-quint);
+    background: linear-gradient(180deg, var(--primary-dim) 0%, var(--primary-dark) 100%);
+    border-top-color: var(--primary-dark);
+    border-bottom-color: var(--primary-light);
+    box-shadow:
+        0 1px 4px rgba(48, 80, 255, 0.2),
+        0 0 0 1px rgba(48, 80, 255, 0.08) inset,
+        0 -1px 0 rgba(255,255,255,0.04) inset;
+    transform: translateY(1px) scale(0.97);
+>>>>>>> Stashed changes
 }
 
 /* --- Sections --- */
@@ -565,7 +588,7 @@ strong {
 }
 
 .section-header h2 {
-    font-size: 28px;
+    font-size: 22px;
     font-weight: 650;
     color: #fff;
     letter-spacing: -0.02em;
@@ -573,7 +596,7 @@ strong {
 
 .section-desc {
     color: var(--text-dim);
-    font-size: 16px;
+    font-size: 14px;
     line-height: 1.7;
     max-width: 640px;
     margin: 0 auto 40px;
@@ -592,18 +615,20 @@ strong {
     border: 1px solid var(--border);
     border-radius: var(--radius);
     padding: 20px;
-    transition: border-color 0.3s var(--ease-out-quad), background 0.3s var(--ease-out-quad), transform 0.3s var(--ease-out-quint);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+    transition: border-color 0.3s var(--ease-out-quad), background 0.3s var(--ease-out-quad), transform 0.3s var(--ease-out-quint), box-shadow 0.3s var(--ease-out-quad);
     will-change: transform;
 }
 
 .feature-card:hover {
     border-color: var(--border-hover);
     background: var(--bg-card-hover);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.04) inset;
 }
 
 @media (hover: hover) and (pointer: fine) {
     .feature-card:hover {
-        transform: translateY(-2px);
+        transform: translateY(-3px);
     }
 }
 
@@ -623,16 +648,17 @@ strong {
 }
 
 .feature-card h3 {
-    font-size: 15px;
-    font-weight: 600;
+    font-size: 14px;
+    font-weight: 650;
     color: #fff;
     letter-spacing: -0.01em;
+    line-height: 1.3;
 }
 
 .feature-card p {
-    font-size: 14px;
+    font-size: 13px;
     color: var(--text-dim);
-    line-height: 1.65;
+    line-height: 1.6;
 }
 
 /* --- Terminal Demo --- */
@@ -1167,12 +1193,12 @@ strong {
     height: 6px;
 }
 ::-webkit-scrollbar-track {
-    background: var(--bg);
+    background: rgba(255, 255, 255, 0.03);
 }
 ::-webkit-scrollbar-thumb {
-    background: var(--border-hover);
+    background: rgba(255, 255, 255, 0.12);
     border-radius: 3px;
 }
 ::-webkit-scrollbar-thumb:hover {
-    background: var(--primary-dim);
+    background: rgba(255, 255, 255, 0.22);
 }

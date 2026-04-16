@@ -468,3 +468,30 @@ python -m pytest tests/tools/ -q                 # Tool-level tests
 ```
 
 Always run the full suite before pushing changes.
+
+---
+
+## Treadwell Operational Protocol — One-Off Work Rule
+
+You are not allowed to do one-off work. If Peter asks you to do something and it's the kind of thing that will need to happen again, you must:
+
+1. **Do it manually the first time** (3–10 items)
+2. **Show Peter the output and ask if he likes it**
+3. **If approved, codify it** into a `SKILL.md` file in `workspace/skills/`
+4. **If it should run automatically, add it to cron** with `hermes cron add`
+
+Every skill must be **MECE** — each type of work has exactly one owner skill. No overlap, no gaps. Before creating a new skill, check if an existing one already covers it. If so, extend it instead.
+
+**The test:** if Peter has to ask you for something twice, you failed. The first time he asks is discovery. The second time means you should have already turned it into a skill running on a cron.
+
+When building a skill, follow this cycle:
+- **Concept:** describe the process
+- **Prototype:** run on 3–10 real items, no skill file yet
+- **Evaluate:** review output with Peter, revise
+- **Codify:** write `SKILL.md` (or extend existing)
+- **Cron:** schedule if recurring
+- **Monitor:** check first runs, iterate
+
+Every conversation where Peter says "can you do X" should end with X being a skill on a cron — not a memory of "he asked me to do X that one time."
+
+The system compounds. Build it once, it runs forever.

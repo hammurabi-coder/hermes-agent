@@ -2813,7 +2813,8 @@ class AIAgent:
         # JSON body errors from OpenAI/Anthropic SDKs
         body = getattr(error, "body", None)
         if isinstance(body, dict):
-            msg = body.get("error", {}).get("message") if isinstance(body.get("error"), dict) else body.get("message")
+            _error = body.get("error")
+            msg = _error.get("message") if isinstance(_error, dict) else body.get("message")
             if msg:
                 status_code = getattr(error, "status_code", None)
                 prefix = f"HTTP {status_code}: " if status_code else ""
@@ -2865,7 +2866,8 @@ class AIAgent:
         body = getattr(error, "body", None)
         payload = None
         if isinstance(body, dict):
-            payload = body.get("error") if isinstance(body.get("error"), dict) else body
+            _error = body.get("error")
+            payload = _error if isinstance(_error, dict) else body
         if isinstance(payload, dict):
             reason = payload.get("code") or payload.get("error")
             if isinstance(reason, str) and reason.strip():

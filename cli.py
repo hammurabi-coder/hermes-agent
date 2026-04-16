@@ -4156,6 +4156,23 @@ class HermesCLI:
         if not silent:
             print("(^_^)v New session started!")
 
+        # Self-improvement warmup: surface open questions, hot-memory state, pending WAL
+        try:
+            hermes_home = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
+            warmup_script = os.path.join(hermes_home, "improve", "warmup.py")
+            if os.path.exists(warmup_script):
+                import subprocess
+                result = subprocess.run(
+                    ["python3", warmup_script, "--brief"],
+                    capture_output=True, text=True, timeout=5,
+                    cwd=hermes_home,
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    print()  # blank line before warmup
+                    print(result.stdout.strip())
+        except Exception:
+            pass  # warmup failures must never break session startup
+
     def _handle_resume_command(self, cmd_original: str) -> None:
         """Handle /resume <session_id_or_title> — switch to a previous session mid-conversation."""
         parts = cmd_original.split(None, 1)
