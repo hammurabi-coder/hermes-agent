@@ -598,6 +598,10 @@ def check_dangerous_command(command: str, env_type: str,
     Returns:
         {"approved": True/False, "message": str or None, ...}
     """
+    # Load permanent allowlist from config.yaml on first use
+    # (lazy-load avoids circular import issues at module startup)
+    load_permanent_allowlist()
+
     if env_type in ("docker", "singularity", "modal", "daytona"):
         return {"approved": True, "message": None}
 
@@ -719,6 +723,9 @@ def check_all_command_guards(command: str, env_type: str,
         return {"approved": True, "message": None}
 
     # --- Phase 1: Gather findings from both checks ---
+
+    # Load permanent allowlist from config.yaml on first use
+    load_permanent_allowlist()
 
     # Tirith check — wrapper guarantees no raise for expected failures.
     # Only catch ImportError (module not installed).

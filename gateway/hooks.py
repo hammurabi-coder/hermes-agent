@@ -66,6 +66,20 @@ class HookRegistry:
         except Exception as e:
             print(f"[hooks] Could not load built-in boot-md hook: {e}", flush=True)
 
+        # Overnight daemon — always-on work queue runner
+        try:
+            from gateway.builtin_hooks.overnight_agent import handle as overnight_handle
+
+            self._handlers.setdefault("gateway:startup", []).append(overnight_handle)
+            self._loaded_hooks.append({
+                "name": "overnight-agent",
+                "description": "Always-on overnight work queue daemon — runs 12c pipeline without cron timeouts",
+                "events": ["gateway:startup"],
+                "path": "(builtin)",
+            })
+        except Exception as e:
+            print(f"[hooks] Could not load built-in overnight-agent hook: {e}", flush=True)
+
     def discover_and_load(self) -> None:
         """
         Scan the hooks directory for hook directories and load their handlers.
